@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="az"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>VR Kinoteatr</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:sans-serif}
+#eyes{position:fixed;inset:0;display:none}
+canvas{position:absolute;inset:0;width:100%;height:100%}
+.layer{position:absolute;top:0;height:100%;width:50%;overflow:hidden}
+#LL{left:0}
+#LR{left:50%}
+#LR,#LR *{pointer-events:none!important}
+#ui{position:fixed;inset:0;background:#111;color:#fff;display:flex;flex-direction:column;
+ gap:12px;align-items:center;justify-content:center;padding:20px;text-align:center}
+#ui input{width:90%;max-width:480px;padding:12px;font-size:16px}
+#ui button{padding:12px 28px;font-size:18px}
+#ui small{opacity:.7}
+</style>
+<script type="importmap">
+{"imports":{
+ "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+ "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+</head><body>
+
+<div id="ui">
+ <div>YouTube linkini yapışdır:</div>
+ <input id="link" placeholder="https://www.youtube.com/watch?v=...">
+ <button id="go">VR-ı başlat</button>
+ <small>Başladıqdan sonra telefonu üfüqi tutub Shinecon-a qoy.<br>Səs sol videodan gəlir; lazım olsa sol videoya toxunub başlat.</small>
+</div>
+
+<div id="eyes">
+ <canvas id="gl"></canvas>
+ <div class="layer" id="LL"></div>
+ <div class="layer" id="LR"></div>
+</div>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script type="module">
+import * as THREE from 'three';
+import {CSS3DRenderer,CSS3DObject} from 'three/addons/renderers/CSS3DRenderer.js';
+
+/* ====== AYARLAR (buranı dəyişib oynaya bilərsən) ====== */
+const CFG={
+ pano:'qis360.jpg', // mənzərə şəkli (index.html ilə eyni qovluqda)
+ tvDist:4,          // televizorun məsafəsi (böyüdükcə uzaqlaşır)
+ tvWidth:3.2,       // televizorun eni (böyüdükcə böyüyür)
+ tvHeight:0,        // televizorun hündürlüyü (0 = göz səviyyəsi)
+ ipd:0.064          // gözlər arası məsafə (dərinlik hissi)
+};
+
+const $=id=>document.getElementById(id);
+const canvas=$('gl');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+
+/* ---- 360° mənzərə ---- */
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0xbfd3e6); // şəkil tapılmasa qış-mavi fon
+new THREE.TextureLoader().load(CFG.pano,tex=>{
+ tex.colorSpace=THREE.SRGBColorSpace;
+ const geo=new THREE.SphereGeometry(50,64,48);
+ geo.scale(-1,1,1);
+ scene.add(new THREE.Mesh(geo,new THREE.MeshBasicMaterial({map:tex})));
+},undefined,()=>console.warn('Mənzərə şəkli tapılmadı: '+CFG.pano));
+
+/* ---- İki göz üçün kamera ---- */
+const camL=new THREE.PerspectiveCamera(75,1,0.1,200);
+const camR=new THREE.PerspectiveCamera(75,1,0.1,200);
+
+/* ---- Televizor (hər göz üçün ayrı CSS3D) ---- */
+const cssL=new CSS3DRenderer(), cssR=new CSS3DRenderer();
+$('LL').appendChild(cssL.domElement);
+$('LR').appendChild(cssR.domElement);
+const sceneL=new THREE.Scene(), sceneR=new THREE.Scene();
+const k=CFG.tvWidth/1280;
+function makeTV(scn,id){
+ const el=document.createElement('div');
+ el.style.cssText='width:1280px;height:720px;background:#000';
+ const holder=document.createElement('div');holder.id=id;el.appendChild(holder);
+ const o=new CSS3DObject(el);
+ o.position.set(0,CFG.tvHeight,-CFG.tvDist);
+ o.scale.setScalar(k);
+ scn.add(o);
+}
+makeTV(sceneL,'pL');makeTV(sceneR,'pR');
+
+/* ---- Ölçülər ---- */
+function resize(){
+ const w=innerWidth,h=innerHeight,hw=w/2;
+ renderer.setSize(w,h,false);
+ cssL.setSize(hw,h);cssR.setSize(hw,h);
+ camL.aspect=camR.aspect=hw/h;
+ camL.updateProjectionMatrix();camR.updateProjectionMatrix();
+}
+addEventListener('resize',resize);
+
+/* ---- Gyroscope (baş hərəkəti) ---- */
+const rad=d=>d*Math.PI/180;
+let gyro=null,needCenter=true;
+addEventListener('deviceorientation',e=>{
+ if(e.alpha==null)return;
+ gyro={a:rad(e.alpha),b:rad(e.beta),g:rad(e.gamma)};
+});
+const zee=new THREE.Vector3(0,0,1),euler=new THREE.Euler(),
+ q0=new THREE.Quaternion(),q1=new THREE.Quaternion(-Math.sqrt(.5),0,0,Math.sqrt(.5)),
+ q=new THREE.Quaternion(),off=new THREE.Quaternion(),fwd=new THREE.Vector3(),
+ Y=new THREE.Vector3(0,1,0),right=new THREE.Vector3(1,0,0);
+function updateOrientation(){
+ if(!gyro)return;
+ const o=rad(screen.orientation?.angle||window.orientation||0);
+ euler.set(gyro.b,gyro.a,-gyro.g,'YXZ');
+ q.setFromEuler(euler);q.multiply(q1);q.multiply(q0.setFromAxisAngle(zee,-o));
+ if(needCenter){ // baxdığın tərəf = televizorun olduğu tərəf
+  fwd.set(0,0,-1).applyQuaternion(q);
+  off.setFromAxisAngle(Y,-Math.atan2(-fwd.x,-fwd.z));
+  needCenter=false;
+ }
+ const final=off.clone().multiply(q);
+ for(const c of [camL,camR])c.quaternion.copy(final);
+ camL.position.copy(right).multiplyScalar(-CFG.ipd/2).applyQuaternion(final);
+ camR.position.copy(right).multiplyScalar(CFG.ipd/2).applyQuaternion(final);
+}
+
+/* ---- Render ---- */
+function loop(){
+ updateOrientation();
+ const w=innerWidth,h=innerHeight,hw=w/2;
+ renderer.setScissorTest(true);
+ renderer.setViewport(0,0,hw,h);renderer.setScissor(0,0,hw,h);
+ renderer.render(scene,camL);
+ renderer.setViewport(hw,0,hw,h);renderer.setScissor(hw,0,hw,h);
+ renderer.render(scene,camR);
+ cssL.render(sceneL,camL);cssR.render(sceneR,camR);
+}
+
+/* ---- YouTube ---- */
+let L,R;
+function startVideo(ID){
+ const opts={width:'1280',height:'720'};
+ R=new YT.Player('pR',{...opts,videoId:ID,
+  playerVars:{controls:0,playsinline:1,disablekb:1},
+  events:{onReady:e=>e.target.mute()}});
+ L=new YT.Player('pL',{...opts,videoId:ID,playerVars:{playsinline:1},
+  events:{
+   onReady:e=>e.target.playVideo(),
+   onStateChange:e=>{
+    if(e.data===1){R.seekTo(L.getCurrentTime(),true);R.playVideo()}
+    if(e.data===2)R.pauseVideo();
+   }}});
+ setInterval(()=>{
+  if(L?.getPlayerState?.()===1&&R?.getCurrentTime&&
+   Math.abs(L.getCurrentTime()-R.getCurrentTime())>0.3)
+   R.seekTo(L.getCurrentTime(),true);
+ },2000);
+}
+
+/* ---- Başlat düyməsi ---- */
+$('go').onclick=async()=>{
+ const m=$('link').value.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([\w-]{11})/);
+ if(!m){alert('YouTube linki səhvdir');return}
+ if(!window.YT||!YT.Player){alert('YouTube hələ yüklənməyib, bir az gözləyib yenidən bas');return}
+ // iOS üçün sensor icazəsi (Android-də lazım deyil)
+ if(typeof DeviceOrientationEvent!=='undefined'&&DeviceOrientationEvent.requestPermission){
+  try{await DeviceOrientationEvent.requestPermission()}catch(e){}
+ }
+ try{await document.documentElement.requestFullscreen()}catch(e){}
+ try{await screen.orientation.lock('landscape')}catch(e){}
+ $('ui').style.display='none';
+ $('eyes').style.display='block';
+ resize();
+ renderer.setAnimationLoop(loop);
+ startVideo(m[1]);
+};
+</script>
+</body></html>
